@@ -50,6 +50,8 @@ class FactorTimingStrategy:
         """Create timing portfolios by interacting factors with predictors"""
         timing_returns = {}
         for f_name in factor_returns.columns:
+            # timing_returns[f"{f_name}_{"Original"}"] = factor_returns[f_name]
+        # for f_name in factor_returns.columns:
             for p_name in predictors.columns:
                 # Predictors are already lagged in __init__, so no need to shift again
                 timing_returns[f"{f_name}_{p_name}"] = (
@@ -66,18 +68,20 @@ class FactorTimingStrategy:
         lw = LedoitWolf().fit(X_clean)
         return lw.covariance_, lw.location_
     
-    def compute_ridge_weights(self, mu, Sigma, shrink_k, diag_penalty):
+    def compute_ridge_weights(self, T, mu, Sigma, shrink_k, diag_penalty):
         """Compute portfolio weights with ridge regularization"""
-        T = len(mu)
+        #T = len(mu)
         penalty_matrix = np.zeros_like(Sigma)
         np.fill_diagonal(penalty_matrix, diag_penalty)
-        
+        penalty_matrix[:, :len(self.factor_returns.columns)] = 0
+
         # Ridge regularization
         Sigma_shrunk = Sigma + shrink_k / T * penalty_matrix
         
         # Solve for optimal weights
         try:
             weights = np.linalg.solve(Sigma_shrunk, mu)
+            # weights = np.linalg.inv(Sigma_shrunk) @ mu
         except np.linalg.LinAlgError:
             # Fallback to pseudo-inverse if singular
             weights = np.linalg.pinv(Sigma_shrunk) @ mu
@@ -93,7 +97,7 @@ class FactorTimingStrategy:
     
     def compute_max_drawdown(self, returns):
         """Compute maximum drawdown"""
-        cumulative = (1 + returns).cumprod()
+        cumulative = (1 + returns/100).cumprod()
         running_max = cumulative.expanding().max()
         drawdown = (cumulative - running_max) / running_max
         return drawdown.min()
@@ -103,9 +107,9 @@ class FactorTimingStrategy:
         metrics = {}
         
         # Basic metrics
-        metrics['Total Return'] = (1 + returns).prod() - 1
-        metrics['Annualized Return'] = (1 + returns.mean()) ** periods - 1
-        metrics['Annualized Volatility'] = returns.std() * np.sqrt(periods)
+        metrics['Total Return'] = (1 + returns/100).prod() - 1
+        metrics['Annualized Return'] = (1 + returns.mean()/100) ** periods - 1
+        metrics['Annualized Volatility'] = (returns/100).std() * np.sqrt(periods)
         metrics['Sharpe Ratio'] = self.compute_sharpe(returns, periods)
         
         # Risk metrics
@@ -151,13 +155,13 @@ class FactorTimingStrategy:
                 # Compute covariance and mean
                 Sigma, mu = self.compute_shrunk_cov(G_train)
                 diag_penalty = np.diag(Sigma)
-                
+
                 # Validation loop to choose optimal k
                 best_k = None
                 best_sr = -np.inf
                 
                 for k in self.shrinkage_grid:
-                    w = self.compute_ridge_weights(mu, Sigma, k, diag_penalty)
+                    w = self.compute_ridge_weights(len(G_train), mu, Sigma, k, diag_penalty)
 
                     # Validation performance
                     G_val = self.create_timing_portfolios(self.factor_returns.iloc[val_idx], 
@@ -170,11 +174,18 @@ class FactorTimingStrategy:
                         best_k = k
                 
                 # Final weights with best k
-                w_final = self.compute_ridge_weights(mu, Sigma, best_k, diag_penalty)
+                w_final = self.compute_ridge_weights(len(G_train), mu, Sigma, best_k, diag_penalty)
+                # Rescale weights
+                I_K = np.eye(len(factor_returns.columns))
+                w_imp = np.kron(I_K, self.predictors.iloc[[test_idx]])@w_final
+
                 # Out-of-sample test
                 G_test = self.create_timing_portfolios(self.factor_returns.iloc[[test_idx]], 
                                                        self.predictors.iloc[[test_idx]])
                 r_test = G_test @ w_final
+
+                # Implied returns
+                r_test = self.factor_returns.iloc[[test_idx]] @ w_imp
 
                 # Store results
                 self.portfolio_returns.append(r_test.iloc[0])
@@ -201,7 +212,7 @@ class FactorTimingStrategy:
         fig, axes = plt.subplots(2, 2, figsize=figsize)
         
         # Cumulative returns
-        cum_returns = (1 + self.returns_series).cumprod()
+        cum_returns = (1 + self.returns_series/100).cumprod()
         cum_returns.plot(ax=axes[0,0], title='Cumulative Returns', color='steelblue', linewidth=2)
         axes[0,0].set_ylabel('Cumulative Return')
         axes[0,0].grid(True, alpha=0.3)
@@ -215,7 +226,7 @@ class FactorTimingStrategy:
         axes[0,1].grid(True, alpha=0.3)
         
         # Drawdown
-        cumulative = (1 + self.returns_series).cumprod()
+        cumulative = (1 + self.returns_series/100).cumprod()
         running_max = cumulative.expanding().max()
         drawdown = (cumulative - running_max) / running_max
         drawdown.plot(ax=axes[1,0], title='Drawdown', color='red', linewidth=2, alpha=0.8)
